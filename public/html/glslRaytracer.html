@@ -1,0 +1,282 @@
+<html>
+  <head>
+    <title>glsl raytracer</title>
+    <script src="js/THREE/three.min.js"></script>
+    <script src="js/THREE/OrbitControls.js"></script>
+    <script src="js/THREE/stats.min.js"></script>
+
+    <style>
+      body { margin: 0; }
+    </style>
+  </head>
+
+  <body>
+    <script id="vertexShader" type="x-shader/x-vertex">
+
+      varying vec2 vUv;
+      varying float colorWeight;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      void main() {
+        vUv = uv;
+        vec4 modelViewPosition = modelViewMatrix * vec4(position, 1.0);
+				vPos = modelViewPosition.xyz;
+				vNormal = normalMatrix * normal;
+				gl_Position = projectionMatrix * modelViewPosition;
+      }
+
+    </script>
+    <script id="fragmentShader" type="x-shader/x-fragment">
+
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      uniform vec3 camPos;
+      uniform vec3 camDir;
+      uniform vec3 camUp;
+      uniform float time;
+
+      const float RADIUS = 0.1;
+
+      struct Winner {
+        float t;
+        float idx;
+      };
+
+      float rand(vec2 co){
+          return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+      }
+
+      float hitSphere(vec3 center, float radius, vec3 direction, vec3 origin) {
+        vec3 oc = origin - center;
+        float a = dot(direction, direction);
+        float b = 2.0 * dot(oc, direction);
+        float c= dot(oc, oc) - radius*radius;
+        float discriminant = b*b - 4.0*a*c;
+
+        if (discriminant >= 0.0) {
+          return ((-b - sqrt(discriminant)) / (2.0*a));
+        };
+        return -1.0;
+      }
+
+      vec3 getCenter(float idx){
+        return vec3(0.5*sin(idx*time/1000.0)-0.1*idx, 0.5*sin(-0.3 + idx*time/1000.0), -1.0 - 0.2*idx);
+      }
+
+      float hitXYRect(float x0, float x1, float y0, float y1, float k, vec3 direction, vec3 origin){
+        float t = (k - origin.z)/direction.z;
+        float x = origin.x + t*direction.x;
+        float y = origin.y + t*direction.y;
+        if(x < x0 || x > x1 || y<y0 || y > y1){
+          return -1.0;
+        }
+        return t;
+      }
+
+      Winner hitWorld(vec3 direction, vec3 origin){
+        float winT = 10000.0;
+        float winIdx = -1.0;
+
+        //run through spheres
+        for (float i =0.0; i<7.0; i++){
+          vec3 center = getCenter(i);
+          float t = hitSphere(center, RADIUS, direction, origin);
+          if(t>0.0001 && t<100.0){
+            if(t<winT){
+              winT = t;
+              winIdx = i;
+            }
+          }
+        }
+
+        //make ground sphere
+        vec3 center = vec3(0.0, -1.5, -1.0);
+        float t = hitSphere(center, 1.2, direction, origin);
+        if(t>0.0001 && t<100.0){
+          if(t<winT){
+            winT = t;
+            winIdx = 100.0;
+          }
+        }
+
+        //make light sphere
+        t = hitXYRect(-1.0, 1.0, 0.0, 2.0, -4.0, direction, origin);
+        if(t>0.0001 && t<100.0){
+          if(t<winT){
+            winT = t;
+            winIdx = 106.0;
+          }
+        }
+
+        return Winner(winT, winIdx);
+      }
+
+      float schlick(float cosine, float ref_idx){
+        float r0 = (1.0- ref_idx)/(1.0+ref_idx);
+        r0 = r0*r0;
+        return r0 + (1.0-r0)*pow((1.0-cosine),5.0);
+      }
+
+      vec3 firstBounce(vec3 direction, vec3 origin){
+        vec3 skyColor = vec3(0.2, 0.5, 0.7);
+        vec3 k = vec3(1.0,1.0,1.0);
+        vec3 added = vec3(0.0, 0.0, 0.0);
+
+        for (int i = 0; i<60; i ++){
+          Winner winner = hitWorld(direction, origin);
+          if(winner.idx >= 0.0){
+            //calc normal and return it
+            vec3 p = origin + winner.t*direction;
+
+            vec3 center;
+            vec3 normal;
+            if(winner.idx > 99.0){
+              center = vec3(0.0, -10.0, 0.0);
+              normal = (p - center)/20.0;
+            } else {
+              center = getCenter(winner.idx);
+              normal = (p - center)/RADIUS;
+            }
+
+            vec3 reflectedDir = reflect(direction, normal);
+            origin = p;
+
+            //first two spheres are dielectric lol.
+            if(winner.idx < 3.0){
+              vec3 outwardNormal;
+              float ni_over_nt;
+              float ref_idx = 1.5;
+              float cosine, reflectProb;
+
+              if(dot(direction, normal) > 0.0 ){
+                outwardNormal = -normal;
+                ni_over_nt = ref_idx;
+                cosine = ref_idx *dot(direction,normal)/length(direction);
+              } else {
+                outwardNormal = normal;
+                ni_over_nt = 1.0/ref_idx;
+                cosine = -dot(direction,normal)/length(direction);
+              }
+
+              vec3 refractedDir = refract(direction, outwardNormal, ni_over_nt);
+              if(refractedDir.x != 0.0) {
+                  reflectProb = schlick(cosine, ref_idx);
+              } else {
+                reflectProb = 1.0;
+              }
+              //chose whether to reflect or refract
+              if(rand(vec2(direction.xy)) < reflectProb){
+                direction = reflectedDir;
+                k *= (1.0, 1.0, 1.0);
+              } else {
+                direction = refractedDir;
+                k *= (1.0, 1.0, 1.0);
+              }
+            } else if (winner.idx < 105.0){ //this material is not dielectric, so reflect by default
+              vec3 randomDir = vec3(1.0, 1.0, 1.0);
+              randomDir.x = rand(vec2(direction.x, direction.y));
+              randomDir.y = rand(vec2(direction.y, direction.z));
+              randomDir.z = rand(vec2(direction.z, direction.x));
+              //add fuziness to the metals
+              direction = reflectedDir + 0.2*randomDir;
+              k *= (0.5*vec3(rand(vec2(winner.idx, winner.idx)),min(winner.idx*0.3,1.0),0.9));
+            } else {
+              added += (k*vec3(6.2,6.2,6.2));
+            }
+          } else {
+            return added + k*skyColor;
+          }
+        }
+      }
+
+
+      void main() {
+        vec3 w = normalize(camDir);
+        vec3 u = normalize(cross(camUp, w));
+        vec3 v = normalize(cross(w, u));
+
+        vec3 newDir = (vUv.x-0.5)*u + (vUv.y-0.5)*v  + camDir;
+        vec4 col = vec4(firstBounce(newDir, camPos),1.0);
+        gl_FragColor = vec4(sqrt(col.x),sqrt(col.y),sqrt(col.z), 1.0);
+      }
+
+    </script>
+    <script>
+
+      //initialize scene
+      let scene = new THREE.Scene();
+      //initialize camera
+      let camera = new THREE.PerspectiveCamera( 75, window.innerWidth/window.innerHeight, 0.1, 1000 );
+      camera.position.x = 10;
+      //set up orbit controls on the camera
+      let controls = new THREE.OrbitControls(camera);
+      //initialize renderer
+      let renderer = new THREE.WebGLRenderer({antialias:true});
+      var raycaster = new THREE.Raycaster();
+      var mouse = new THREE.Vector2();
+      var texload = new THREE.TextureLoader();
+
+      renderer.setSize( window.innerWidth, window.innerHeight );
+      //add renderer to the html page
+      document.body.appendChild( renderer.domElement );
+
+      var mUniforms = ({
+        time : {type: 'f', value: 0},
+        camPos : {type: 'v3', value: new THREE.Vector3(0,0,0)},
+        camDir : {type: 'v3', value: new THREE.Vector3(0,0,-1)},
+        camUp : {type: 'v3', value: new THREE.Vector3(0,0,-1)}
+      });
+
+      var mat = new THREE.ShaderMaterial ({
+        uniforms : mUniforms,
+        vertexShader: document.getElementById( 'vertexShader' ).textContent,
+        fragmentShader: document.getElementById( 'fragmentShader' ).textContent,
+        side : THREE.DoubleSide,
+        lights: false,
+        derivatives: true,
+        transparent: true,
+      });
+
+      var planeGeo = new THREE.PlaneGeometry(100, 100, 100);
+      var planeMesh = new THREE.Mesh(planeGeo, mat);
+      planeMesh.position.z = -10;
+      camera.add(planeMesh);
+
+      scene.add(camera);
+
+      var cameraWorldDir = new THREE.Vector3(0,0,1);
+      var cameraWorldQuat = new THREE.Quaternion();
+
+
+      var stats = new Stats();
+      stats.showPanel( 0 ); // 0: fps, 1: ms, 2: mb, 3+: custom
+      document.body.appendChild( stats.dom );
+
+      const startTime = Date.now();
+
+      let animate = function () {
+        stats.begin();
+        camera.getWorldDirection(cameraWorldDir)
+        camera.getWorldQuaternion(cameraWorldQuat)
+        var cameraUp = new THREE.Vector3(0,1,0).applyQuaternion(cameraWorldQuat);
+
+        // planeMesh.position.x = camera.position.x;
+        // planeMesh.position.y = camera.position.y;
+        // planeMesh.position.z = camera.position.z;
+
+        planeMesh.material.uniforms.camPos.value = camera.position;
+        planeMesh.material.uniforms.camDir.value = cameraWorldDir;
+        planeMesh.material.uniforms.camUp.value = cameraUp;
+        planeMesh.material.uniforms.time.value = Date.now() - startTime;
+
+        controls.update()
+        requestAnimationFrame( animate );
+        renderer.render(scene, camera);
+        stats.end()
+      };
+
+      animate();
+    </script>
+  </body>
+</html>
